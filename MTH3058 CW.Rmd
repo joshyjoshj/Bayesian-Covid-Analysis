@@ -1,0 +1,559 @@
+---
+title: "Bayesian Statistics, Philosophy and Practice: Coursework Assignment"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+##### Packages ####
+library("rstan")
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+library(brms)
+library(bayesplot)
+library(tidybayes)
+library(tidyverse)
+library(reshape2)
+library(gridExtra)
+library(lubridate)
+
+##### Data Import ####
+variants <- readRDS("~/variants.rds")
+#Selecting given countries
+variants <- variants%>%filter(country%in%c("Germany","UK","France","Italy","Spain","United Kingdom"))
+
+
+##### Data and  Model Import ####
+load("~/training.rds") #training
+load("~/testing.rds") #testing
+load("~/baseline_model.rda") #baseline
+load("~/model_1.rda") #model_1
+load("~/model_2.rda") #model_2
+load("~/model_3.rda") #model_3
+load("~/model_4.rda") #model_4
+
+```
+
+## Question 1
+
+To begin the analysis a visualization of the data:
+
+```{r,echo=FALSE,warning=FALSE,fig.width=6,fig.height=6,fig.cap="First Data Visualization"}
+#melting Dataframe 
+melt_df <- melt(variants,id.vars ="cases")
+#Plotting categorical variables
+cat_plot <- ggplot(filter(melt_df,variable%in%c("country","variant")),mapping=aes(x=value,y=cases,colour=variable))+
+  geom_point()+
+  facet_wrap("variable",scales="free_x")+
+  labs(y="cases",x="")+
+  theme_bw()%+replace%
+  theme(axis.text.x = element_text(angle = 90))
+#Plotting continuous variables variables
+cont_plot <- ggplot(filter(melt_df,variable%in%c("date","biweek")),mapping=aes(x=as.numeric(value),y=cases,colour=variable))+
+  geom_point()+
+  facet_wrap("variable",scales="free_x")+
+  scale_colour_manual(values = c("orange","green"))+
+  labs(y="cases",x="")+
+  theme_bw()
+#Arranging plots
+grid.arrange(cont_plot,cat_plot,nrow=2)
+```
+
+The plot shows that there are considerable differences in case numbers between both variants and countries. Notably, the UK dominates case numbers with Germany following although some way behind as the maximum number of cases is 77000 in the UK compared to 20000 in Germany. Furthermore, Delta and Alpha variants see the highest case numbers with maximum values of 77000 and 35000 respectively. Other variants see very little cases in comparison. Date and biweek are the same variable as they both represent time. There are appears to be some relationship between biweek and case numbers. It seems plausible that a baseline model could be `cases ~ biweek + variant + country`. The cases are unbounded count data so a sensible family to use for the model would be the negatigve binomial. Therefore:
+
+
+$$
+Y_{i}|\beta_{0},\dots,\beta_{10},\phi \sim \text{Negative Binomial} (\mu_{i},\phi) 
+$$
+
+and 
+
+$$
+\begin{aligned}
+&\text{log}(\mu_{i}) = \beta_{0} + \beta_{1}(\operatorname{variant}_{\operatorname{Beta}}) + \beta_{2}(\operatorname{variant}_{\operatorname{Delta}}) + \beta_{3}(\operatorname{variant}_{\operatorname{Gamma}}) + \beta_{4}(\operatorname{variant}_{\operatorname{non\_who}}) + \beta_{5}(\operatorname{variant}_{\operatorname{Other}})  \\ &+ \beta_{6}(\operatorname{country}_{\operatorname{Germany}}) + \beta_{7}(\operatorname{country}_{\operatorname{Italy}}) + \beta_{8}(\operatorname{country}_{\operatorname{Spain}}) + \beta_{9}(\operatorname{country}_{\operatorname{United\ Kingdom}}) + \beta_{10}(\operatorname{biweek}) \\ &\therefore \\ &\mu_{i} = e^{(\beta_{0}+\beta_{1}(\operatorname{variant}_{\operatorname{Beta}})+\dots+\beta_{10}(\operatorname{biweek}))} \\
+&\mu_{i}=e^{\beta_{0}}\dots e^{\beta_{10}(\operatorname{biweek}))}
+\end{aligned}
+$$
+
+Formulating $\mu_{i}$ in this way helps with setting weakly informative priors. For $\beta_{0}$ the mean rate $\mu_{i} \in (0,77000)$ so if all other coefficients were 0 then $\beta_{0} \in (log(1),log(77000)) \implies \beta_{0} \in (0,11.25)$. Therefore set $\beta_{0}\sim(7,2)$. For $\beta_{1}\dots\beta_{9}$ the values of variant and country are either 0 or 1. Therefore calculating $e^\beta$ needs to be a sensible amount to multiply by the mean value by: $e^2$=`r exp(2)`, $e^3$=`r exp(3)` and $e^4$=`r exp(4)`. Hence, let $\beta_{1\dots9} \sim N(0,2)$ as 54 times the mean value would be an upper bound. Following the same  logic for $\beta_{10}$, biweek can take values between 1 and 20. Given $e^{0.2*20}$=`r exp(0.2*20)` let $\beta_{10}\sim N(0,0.1)$. The final parameter to set a prior for is the $\phi$, or the dispersion parameter. The cases are very overdispersed as $Var[Y] > E[Y]$  which means $\phi$ can be expected to be a relatively low number. Plotting a sequence of sensible means from the data and some $\phi$ values between 0 and 1 gives the following:
+
+\pagebreak
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=6,fig.cap="Shape Parameter Estimation plot",message=FALSE,warning=FALSE}
+
+n <- 1000
+mu <- c(500,2000,5000)
+phi <- c(0.05,0.1,0.2,0.3,0.75,1)
+for (i in 1:length(mu)) {
+  for (j in 1:length(phi)) {
+    vals <- rnbinom(n,size=phi[j],mu=mu[i])
+    df_1 <- data.frame(vals,phi=rep(phi[j],n),mu=rep(mu[i],n))
+    ifelse({j==1},{df_j <- df_1},{df_j <- rbind(df_j,df_1)})
+  }
+  ifelse({i==1},{df_i <- df_j},{df_i <- rbind(df_i,df_j)})
+}
+mu_phi_col <- c("Data Max"="#a2c0da")
+ggplot(df_i)+
+  geom_histogram(mapping=aes(x=vals,y=..density..))+
+  facet_grid(c("mu","phi"),scales="free",labeller = "label_both")+
+  geom_vline(mapping=aes(xintercept = 77000,colour="Data Max"),lty=2)+
+  scale_colour_manual(values = mu_phi_col,name="")+
+  theme_bw()%+replace%
+  theme(axis.text.x=element_blank())
+```
+
+From the plot that it certainly would be sensible for $\phi$ to be between 0 and 1, furthermore the values closer to zero seem to give a distribution closer to that of the data hence however do have a larger range. The values of phi closer to one seem to cut the distrribution a little short. Therefore, I choose to set the mean of the prior to 0.2. The shape parameter is always positive so the exponential distribution is a good choice furthermore it is right skewed so the values closer to 1 will be less likely. The mean of the the $Exp(\lambda)$ distribution is $\frac{1}{\lambda}$. Therefore for a mean of 0.2, I set $\lambda=5$. I am unsure if this prior is somewhat informative so will checkc it after the model fit. Therefore the priors for the model are:
+
+- $\beta_{0}\sim(7,2)$
+- $\beta_{1\dots9} \sim N(0,2)$
+- $\beta_{10}\sim N(0,0.1)$
+- $\phi\sim Exp(5)$
+
+Before fitting the model testing and training data sets are created using the following code, which are equally weighted on variant and country:
+
+```{r, echo=TRUE,eval=FALSE}
+testing <- variants%>%group_by(country,variant)%>%sample_frac(0.2)
+training <- setdiff(variants,testing)
+```
+
+Using 20% for the testing set as this isn't a particularly large data set gives 480 data points on the training set and 120 on the testing set. Now fitting the specified model:
+
+```{r,echo=TRUE,eval=FALSE}
+#Baseline model 
+intercept_prior <- set_prior("normal(7,2)",class = "Intercept")
+b_prior <- set_prior("normal(0,2)",class = "b")
+b_prior_biweek <- set_prior("normal(0,0.1)", class = "b", coef = "biweek")
+shape_prior <- set_prior("exponential(5)",class = "shape")
+baseline <- brm(cases  ~ biweek + variant + country , family=negbinomial(),
+                data=training, prior = c(intercept_prior,shape_prior,b_prior,b_prior_biweek))
+```
+
+A summary shows no issues with Rhats as they are all equal to 1 indicating convergence and more than adequate effective sample sizes for both the bulk and tail. 
+
+```{r,echo=FALSE,eval=TRUE}
+summary(baseline)
+```
+
+Further checking of the trace plots show the chains are well mixed with no obvious issues. 
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=6,fig.cap="Baseline Model Trace Plots"}
+mcmc_trace(baseline)
+```
+
+\newpage
+
+Plotting the prior and posterior of the shape parameter shows that the prior is somewhat informative therefore I will no change it further.
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=3,fig.cap="Prior and Posterior densities for Shape",warning=FALSE}
+prior_col <- c("Posterior"="#537ea9","Prior"="#a2c0da")
+rbind(data.frame(samples = posterior_samples(baseline)$shape, type= rep("Posterior",nrow(posterior_samples(baseline)))),data.frame(samples = prior_samples(baseline)$shape,type= rep("Prior",nrow(prior_samples(baseline)))))%>%
+  ggplot()+
+  geom_density(mapping=aes(x=samples,fill=type))+
+  scale_fill_manual(values = prior_col,name = NULL)+
+  labs(x=NULL,y=NULL)+
+  theme_bw()
+
+```
+
+\pagebreak
+
+From the summary there are potentially two intercepts that may warrant further investigation: Germany and biweek.
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=3,fig.cap="Baseline Model posterior checking"}
+baseline_biweek_posterior <- baseline%>%spread_draws(b_biweek)%>%
+  ggplot(mapping = aes(x=b_biweek))+
+  geom_density(fill = "#a2c0da")+labs(x="Posterior Estimate of biweek",y="density")+
+  geom_vline(xintercept = 0, lty=2)+
+  theme_bw()
+
+baseline_germany_posterior <- baseline%>%spread_draws(b_countryGermany)%>%
+  ggplot(mapping = aes(x=b_countryGermany))+
+  geom_density(fill = "#a2c0da")+labs(x="Posterior Estimate of countryGermany",y="density")+
+  geom_vline(xintercept = 0, lty=2)+
+  theme_bw()
+grid.arrange(baseline_biweek_posterior,baseline_germany_posterior,nrow = 1)
+
+```
+
+It was to be expected that Germany may be zero given how similar it's case numbers are to France in the original plot. We can conduct a hypothesis test in `brms` to confirm that Germany is no different from the mean level (France).
+
+```{r,echo=TRUE,eval=FALSE}
+hypothesis(baseline, 'countryGermany < 0')
+```
+
+```{r,echo=FALSE,eval=TRUE}
+hypothesis(baseline, 'countryGermany < 0')
+```
+
+This gives the posterior probability that the coefficient for Germany is less than 0 to be 44%, suggesting that it probably would be worth removing from the model. However, it seems pointless to group Germany and France together given all the other countries give evidence of effect. I am not going to group France and Germany together. Applying the hypothesis test to biweek:
+
+```{r,echo=FALSE,eval=TRUE}
+hypothesis(baseline, 'biweek < 0')
+```
+
+This shows there is less evidence to remove biweek from the model as the posterior probability that the coefficient is less than zero is 75%. Although, does it make sense that the coefficient is estimated to be negative the original plot showed a weak positive correlation. Naturally, it would make sense to group biweek on variant, as variants are present for different time periods. Before looking at another model lets look at the predictions:
+
+```{r,echo=FALSE,eval=TRUE,fig.height=6,fig.width=6,fig.cap="Baseline Predictions"}
+
+testing <- testing%>%mutate(n=seq(1,4,1))
+preds_1 <- predict(baseline,newdata = testing)
+preds_1 <- cbind(testing,as_tibble(preds_1))
+preds_melt <- preds_1%>%select(-Est.Error, -date,-n)%>%melt(id.vars=c("Estimate", "Q2.5", "Q97.5", "cases"))
+
+pred_plot_col <- c("Estimate"="red","Value"="green")
+
+ggplot(preds_1,mapping=aes(x=n))+
+  geom_point(mapping = aes(y=cases,colour="Value"))+
+  geom_point(mapping = aes(y=Estimate,colour="Estimate"))+
+  geom_errorbar(mapping=aes(ymin=Q2.5,ymax=Q97.5))+
+  scale_colour_manual(values = pred_plot_col)+
+  labs(x="Data Point",y="Cases")+
+  facet_grid(c("country","variant"),scales="free")+
+  theme_bw()
+
+```
+
+The estimates for low number of cases appear very accurate but not so with the higher number of cases. However, the credible intervals do capture the countries and variants where there are a larger number of cases. 
+
+\newpage 
+
+Grouping biweek over variant yields the following model:
+
+$$
+\begin{aligned}
+Y_{i}|\alpha,{\beta},\phi &\sim \operatorname{Negative Binomial} (\mu_{i},\phi) \text{, where }\beta \text{ represents the  regression cofficients,}\\
+\log(\mu_i) &=\alpha_{j[i]} + \beta_{1j[i]}(\operatorname{biweek}) + \beta_{2}(\operatorname{country}_{\operatorname{Germany}}) + \beta_{3}(\operatorname{country}_{\operatorname{Italy}}) + \beta_{4}(\operatorname{country}_{\operatorname{Spain}}) + \beta_{5}(\operatorname{country}_{\operatorname{United\ Kingdom}}) \\ &+ \beta_{6}(\operatorname{variant}_{\operatorname{Beta}}) + \beta_{7}(\operatorname{variant}_{\operatorname{Delta}}) + \beta_{8}(\operatorname{variant}_{\operatorname{Gamma}}) + \beta_{9}(\operatorname{variant}_{\operatorname{non\_who}}) + \beta_{10}(\operatorname{variant}_{\operatorname{Other}}) \\    
+  \begin{pmatrix}
+      \alpha_{j} \\
+      \beta_{1j}
+  \end{pmatrix}
+  &\sim N \left(
+  \begin{pmatrix}
+      \epsilon_{\alpha_{j}} \\
+      \epsilon_{\beta_{1j}}
+  \end{pmatrix}, 
+  \begin{pmatrix}
+     \sigma^2_{\alpha_{j}} & \rho_{\alpha_{j}\beta_{1j}} \\ 
+     \rho_{\beta_{1j}\alpha_{j}} & \sigma^2_{\beta_{1j}}
+  \end{pmatrix}
+ \right)
+    \text{, for variant j = 1,} \dots \text{,6}
+\end{aligned}
+$$
+
+This means the priors relating to the $\sigma$'s  in the covariance matrix have to be specified. To begin with I set the SD of the intercept to be Normal(0,2) as a best guess of the variation between variants and set the SD of the regression coefficients to be Normal(0,0.1) to match that of the prior on the regression coefficients. I believe these will be too large. Fitting the model:
+
+```{r,echo=TRUE,eval=FALSE}
+intercept_prior <- set_prior("normal(7,2)",class = "Intercept")
+b_prior <- set_prior("normal(0,2)",class = "b")
+b_prior_biweek <- set_prior("normal(0,0.1)", class = "b", coef = "biweek")
+shape_prior <- set_prior("normal(30000,10000)",class = "shape")
+sd_prior <- set_prior("normal(0,0.1)",class="sd")
+sd_prior_intercept <- set_prior("normal(0,2)",class = "sd", coef="Intercept",group = "variant")
+model_1 <- brm(cases ~ biweek + variant + country + (biweek|variant), family=negbinomial(), data=training, prior = c(intercept_prior,shape_prior,b_prior,b_prior_biweek,sd_prior,sd_prior_intercept))
+```
+
+The models trace plots are well mixed, Rhats are all equal to one and effective sample sizes are all large. (Omitted as not necassary) However, a posterior predictive check(below) shows the model is predicting some extremely large values over 1.5 million cases. This is simply not feasible based on the data and is indicative of improper prior choice. 
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=3,fig.cap="PPC of model 1",message=FALSE}
+pp_check(model_1)
+```
+
+Adjusting the standard deviation priors to Normal(0,0.5) for the intercept and Normal(0,0.006) for the coefficients in an attempt to reduce the range of the posterior yields the following results:
+
+\newpage
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=3,fig.cap="PPC of model 2",message=FALSE}
+pp_check(model_2)
+```
+
+This is significantly better than before, with posterior mimiming the data very well.
+
+```{r,echo=FALSE,eval=TRUE}
+summary(model_2)
+```
+
+The summary shows Rhats are all equal to one indicating convergence however, the bulk ess is a little low for `cor(Intercept,biweek)` but the tail ess is adequate. 
+
+\newpage
+
+```{r,echo=FALSE,eval=TRUE,fig.height=6,fig.width=6,fig.cap="Model 2 Predictions"}
+testing <- testing%>%mutate(n=seq(1,4,1))
+preds_1 <- predict(model_2,newdata = testing)
+preds_1 <- cbind(testing,as_tibble(preds_1))
+preds_melt <- preds_1%>%select(-Est.Error, -date,-n)%>%melt(id.vars=c("Estimate", "Q2.5", "Q97.5", "cases"))
+
+pred_plot_col <- c("Estimate"="red","Value"="green")
+
+ggplot(preds_1,mapping=aes(x=n))+
+  geom_point(mapping = aes(y=cases,colour="Value"))+
+  geom_point(mapping = aes(y=Estimate,colour="Estimate"))+
+  geom_errorbar(mapping=aes(ymin=Q2.5,ymax=Q97.5))+
+  scale_colour_manual(values = pred_plot_col)+
+  labs(x="Data Point",y="Cases")+
+  facet_grid(c("country","variant"),scales="free")+
+  theme_bw()
+
+```
+
+The predictions look marginally better for the larger values as thet seem to follow trend a lot better, this is visible in the UK predictions for Alpha and Delta. It would appear that the predictions are just a little low. The issue may be that the model is not considering country beyond the mean for each country. Perhaps adding an additional intercept grouped over country and variant - `cases ~ biweek + variant + country + (biweek|variant)+(1|country:variant)`. Personally, I don't think this would be beneficial as it is just adding more complexity to the model and more priors to specify. Furthermore, biweek could be grouped over country and variant - `cases ~ biweek + variant + country + (biweek|variant:country)`. This model may solve the problem but the variant and country terms become pointless as they are just means and they are both now considered in the grouping. Hence, I propose the simpler model - `cases ~ biweek +(biweek|country:variant)`. Writing this mathematically:
+
+$$
+\begin{aligned}
+Y_{i}|\alpha,{\beta},\phi &\sim \operatorname{Negative Binomial} (\mu_{i},\phi) \text{, where }\beta \text{ represents the  regression cofficients,}\\
+\log(\mu_i) &=\alpha_{j[i]} + \beta_{1j[i]}(\operatorname{biweek})  \\    
+  \begin{pmatrix}
+      \alpha_{j} \\
+      \beta_{1j}
+  \end{pmatrix}
+  &\sim N \left(
+  \begin{pmatrix}
+      \epsilon_{\alpha_{j}} \\
+      \epsilon_{\beta_{1j}}
+  \end{pmatrix}, 
+  \begin{pmatrix}
+     \sigma^2_{\alpha_{j}} & \rho_{\alpha_{j}\beta_{1j}} \\ 
+     \rho_{\beta_{1j}\alpha_{j}} & \sigma^2_{\beta_{1j}}
+  \end{pmatrix}
+ \right)
+    \text{, for variant:country j = 1,} \dots \text{,30}
+\end{aligned}
+$$
+
+Once again I set the prior on the standard deviation of the intercept as Normal(0,2) but I choose the standard deviation of the coefficients to be Normal(0,0.01), this is because on the previous model Normal(0,0.1) and produced a posterior with a huge range. Fitting the model:
+
+```{r,echo=TRUE,eval=FALSE}
+intercept_prior <- set_prior("normal(7,2)",class = "Intercept")
+b_prior <- set_prior("normal(0,2)",class = "b")
+b_prior_biweek <- set_prior("normal(0,0.1)", class = "b", coef = "biweek")
+shape_prior <- set_prior("exponential(5)",class = "shape")
+sd_prior_intercept <- set_prior("normal(0,2)",class = "sd", coef="Intercept",group = "variant:country")
+sd_prior_biweek <- set_prior("normal(0,0.01",class="sd",coef="biweek",group="variant:country")
+model_3 <- brm(cases ~ biweek  + (biweek|variant:country), family=negbinomial(), data=training, prior = c(intercept_prior,shape_prior,b_prior_biweek,sd_prior_intercept,sd_prior_biweek))
+```
+
+Checking the summary shows no issues with Rhats all at one and ESS are all adequate.
+
+```{r,echo=FALSE,eval=TRUE}
+summary(model_3)
+```
+
+The trace plots are well mixed indicating convergence.
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=3,fig.cap=" Model 3 Trace Plots"}
+mcmc_trace(model_3,pars = c("b_Intercept","b_biweek","sd_variant:country__Intercept","sd_variant:country__biweek","shape"))
+```
+
+\pagebreak
+
+The predictions look better, there are no points outside of the credible interval and point estimates appear to be more accurate. The model seems to still be struggling with variation of the Alpha variant and the credible intervals of some of the delta predictions are larger than hoped for which could become a problem when predicting on new data. I am happy enough to use this model for inference.   
+
+```{r,echo=FALSE,eval=TRUE,fig.height=6,fig.width=6,fig.cap="Model 3 Predictions"}
+testing <- testing%>%mutate(n=seq(1,4,1))
+preds_1 <- predict(model_3,newdata = testing)
+preds_1 <- cbind(testing,as_tibble(preds_1))
+preds_melt <- preds_1%>%select(-Est.Error, -date,-n)%>%melt(id.vars=c("Estimate", "Q2.5", "Q97.5", "cases"))
+
+pred_plot_col <- c("Estimate"="red","Value"="green")
+
+ggplot(preds_1,mapping=aes(x=n))+
+  geom_point(mapping = aes(y=cases,colour="Value"))+
+  geom_point(mapping = aes(y=Estimate,colour="Estimate"))+
+  geom_errorbar(mapping=aes(ymin=Q2.5,ymax=Q97.5))+
+  scale_colour_manual(values = pred_plot_col)+
+  labs(x="Data Point",y="Cases")+
+  facet_grid(c("country","variant"),scales="free")+
+  theme_bw()
+
+```
+
+\pagebreak
+
+## Question 2 
+
+Firstly, the last recorded date in the is `2021-09-20`, which means there are `r as_date("2021-12-31")-as_date("2021-09-20")` days between then and the `2021-31-12` therefore there are 7 fortnights between left in 2021. Creating a new data frame with the following code:
+
+```{r,echo=TRUE,eval=FALSE}
+uk_delta_pred_data <- data.frame(date = seq(as_date("2021-10-04"),by = "2 week",length.out = 7),
+                                 biweek=seq(21,27,1),country=rep("United Kingdom",7),
+                                 variant=rep("Delta",7))
+
+```
+
+Now predicting with this data set with the `probs` set to 5% and 95% to represent a 90% confidence interval. Also adding in the dates:
+
+```{r,echo=TRUE,eval=FALSE}
+uk_delta_predictions <- data.frame(predict(model_3,uk_delta_pred_data, probs = c(0.05,0.95),
+summary = TRUE))
+%>%mutate(biweek=seq(21,27,1),date = seq(as_date("2021-09-27"),by = "2 week",length.out = 7))
+```
+
+This gives the following results:
+
+```{r, echo=FALSE,eval=TRUE}
+uk_delta_pred_data <- data.frame(date = seq(as_date("2021-10-04"),by = "2 week",length.out = 7), biweek=seq(21,27,1),country=rep("United Kingdom",7),variant=rep("Delta",7))
+
+uk_delta_predictions <- data.frame(predict(model_3,uk_delta_pred_data, probs = c(0.05,0.95),summary = TRUE))%>%mutate(biweek=seq(21,27,1),date = seq(as_date("2021-09-27"),by = "2 week",length.out = 7))
+
+
+knitr::kable(uk_delta_predictions,caption = "UK Delta Variant Predictions")
+```
+
+\pagebreak
+
+```{r,echo=FALSE,eval=TRUE,fig.width=6,fig.height=3,fig.cap="UK Delta Variant Predcitions Plot"}
+ggplot(uk_delta_predictions)+
+  geom_point(mapping = aes(x=date,y=Estimate),colour="#a2c0da")+
+  geom_errorbar(mapping=aes(x=date,ymin=Q5,ymax=Q95),colour="#537ea9")+
+  theme_bw()
+```
+
+This gives an estimate as 3425932 cases occurring on `2021-12-20` with a 90% credible interval of (3760,13359540). The efficacy of the model is very poor as it is just predicting exponential growth of case numbers. We would expect the case numbers to probably go up more and then begin to flatline and decrease (parabola) as this is the trend of all the previous variants. The model doesn't predict this because the relationship between time and cases is non-linear so a linear regression model is simply not going to work in predicting this.
+
+## Question 3
+
+For the calculations of the monte-carlo errors I will use the minimum bulk effective sample size across the all the parameters. This was 1300 (see previous summary). After completing a few calculations the monte-carlo error was not below 0.01, so I re-ran the model with double the number of iterations.
+
+```{r,echo=FALSE,eval=TRUE}
+summary(model_4)
+```
+
+The effective sample size is now 2600.  Below is the code for the calculations for part a:
+
+```{r,echo=TRUE,eval=FALSE}
+
+#a
+#Getting vector of dates
+dates <- unique(variants$date)
+#Selecting Case 1
+d1 <- variants%>%filter(variant=="Beta",country=="France")%>%select(country,variant,biweek)
+#Predicting Case 1
+p1 <- predict(model_4,d1, summary = FALSE)
+#Selecting Case 2
+d2 <- variants%>%filter(variant=="non_who",country=="France")%>%select(country,variant,biweek)  
+#Predicting Case 2
+p2 <- predict(model_4,d2, summary = FALSE)
+#Creating estimate stores
+estimate <- numeric(20)
+mc_error <- numeric(20)
+dominance <- numeric(20)
+#Looping over each biweek
+for (i in 1:length(estimate)) {
+estimate[i] <-  mean(p1[,i]>p2[,i]) #monte carlo of dominance 
+mc_error[i] <- sd(p1[,i]>p2[,i])/sqrt(2600) #monte carlo error
+dominance[i] <- ifelse({0.5<estimate[i]},{1},{0}) #dominance true or false
+}
+tibble(estimate,mc_error,dominance,dates)
+```
+
+This produces the following table:
+
+\pagebreak
+
+```{r,echo=FALSE,eval=TRUE}
+
+#a
+#Getting vector of dates
+dates <- unique(variants$date)
+
+#Selecting Case 1
+d1 <- variants%>%filter(variant=="Beta",country=="France")%>%select(country,variant,biweek)
+#Predicting Case 1
+p1 <- predict(model_4,d1, summary = FALSE)
+
+#Selecting Case 2
+d2 <- variants%>%filter(variant=="non_who",country=="France")%>%select(country,variant,biweek)  
+#Predicting Case 2
+p2 <- predict(model_4,d2, summary = FALSE)
+
+#Creating estimate stores
+estimate <- numeric(20)
+mc_error <- numeric(20)
+dominance <- numeric(20)
+for (i in 1:length(estimate)) {
+estimate[i] <-  mean(p1[,i]>p2[,i]) #monte carlo of dominance 
+mc_error[i] <- sd(p1[,i]>p2[,i])/sqrt(2600) #monte carlo error
+dominance[i] <- ifelse({0.5<estimate[i]},{1},{0}) #dominance true or false
+}
+knitr::kable(tibble(estimate,mc_error,dominance,dates),caption="Beta dominance over non_who in France")
+
+```
+
+Therefore the first date that beta dominates non_who is `2021-04-19`. A similar code produces the dominance of Gamma and Delta in Italy:
+
+
+```{r,echo=FALSE,eval=TRUE}
+d1 <- variants%>%filter(variant=="Gamma",country=="Italy")%>%select(country,variant,biweek)
+p1 <- predict(model_4,d1, summary = FALSE)
+
+d2 <- variants%>%filter(variant=="Delta",country=="Italy")%>%select(country,variant,biweek)  
+p2 <- predict(model_4,d2, summary = FALSE)
+
+estimate <- numeric(20)
+mc_error <- numeric(20)
+dominance <- numeric(20)
+for (i in 1:length(estimate)) {
+  estimate[i] <-  mean(p1[,i]>p2[,i])
+  mc_error[i] <- sd(p1[,i]>p2[,i])/sqrt(2600)
+  dominance[i] <- ifelse({0.5<estimate[i]},{1},{0})
+}
+knitr::kable(tibble(estimate,mc_error,dominance,dates),caption = "Gamma dominance over Delta in Italy")
+```
+
+Therefore the last date that Gamma dominates Delta is `2021-04-05`. For the Delta variance over all over strains, the following code loops the estimates over all countries and variants and produces the dates of delta dominance:
+
+
+
+```{r,echo=TRUE,eval=FALSE}
+country <- c("France","Germany","Italy","Spain","United Kingdom")
+biweek <- numeric(length(country))
+c_variants <- c("Alpha","Beta","Gamma","non_who","Other")
+for (k in 1:length(country)) {
+country1 <- country[k]
+for (j in 1:length(c_variants)) {
+variant1 <- c_variants[j]
+d1 <- variants%>%filter(variant=="Delta",country==country1)%>%select(country,variant,biweek)
+p1 <- predict(model_4,d1, summary = FALSE)  
+d2 <- variants%>%filter(variant==variant1,country==country1)%>%select(country,variant,biweek)
+p2 <- predict(model_4,d2, summary = FALSE)  
+estimate <- numeric(20)
+dominance <- numeric(20)
+for (i in 1:length(estimate)) {
+estimate[i] <-  mean(p1[,i]>p2[,i])
+dominance[i] <- ifelse({0.5<estimate[i]},{1},{0})
+}
+df <- tibble(dominance)%>%select_all(list(~paste0(.,sep="_",variant1)))
+ifelse({j==1},{country_df <- df},{country_df <- cbind(country_df,df)})
+}
+biweek[k] <- min(which(rowSums(country_df)==5))
+}
+
+knitr::kable(data.frame(country,dates[biweek]),caption = "Delta dominance")
+```
+
+```{r,echo=FALSE,eval=TRUE}
+country <- c("France","Germany","Italy","Spain","United Kingdom")
+biweek <- numeric(length(country))
+c_variants <- c("Alpha","Beta","Gamma","non_who","Other")
+for (k in 1:length(country)) {
+country1 <- country[k]
+for (j in 1:length(c_variants)) {
+variant1 <- c_variants[j]
+d1 <- variants%>%filter(variant=="Delta",country==country1)%>%select(country,variant,biweek)
+p1 <- predict(model_4,d1, summary = FALSE)  
+d2 <- variants%>%filter(variant==variant1,country==country1)%>%select(country,variant,biweek)
+p2 <- predict(model_4,d2, summary = FALSE)  
+estimate <- numeric(20)
+dominance <- numeric(20)
+for (i in 1:length(estimate)) {
+estimate[i] <-  mean(p1[,i]>p2[,i])
+dominance[i] <- ifelse({0.5<estimate[i]},{1},{0})
+}
+df <- tibble(dominance)%>%select_all(list(~paste0(.,sep="_",variant1)))
+ifelse({j==1},{country_df <- df},{country_df <- cbind(country_df,df)})
+}
+biweek[k] <- min(which(rowSums(country_df)==5)) #Wihch row sums to five 
+}
+
+knitr::kable(data.frame(country,"Date of Delta Dominance"=dates[biweek]),caption = "Delta dominance")
+```
